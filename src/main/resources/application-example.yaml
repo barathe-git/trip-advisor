@@ -1,0 +1,25 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: traveladvisor
+  data:
+    mongodb:
+      uri: mongodb://localhost:27017/travel
+
+app:
+  security:
+    bearer-token: my-secret-token
+
+external:
+  weather:
+    base-url: https://api.openweathermap.org
+    api-key: token
+    timeout-ms: 5000
+
+  country:
+    base-url: https://restcountries.com
+    timeout-ms: 5000
+
+
