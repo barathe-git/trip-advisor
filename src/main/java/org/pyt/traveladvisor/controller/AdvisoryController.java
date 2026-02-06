@@ -70,11 +70,19 @@ public class AdvisoryController {
 
     // ---------------- DELETE ----------------
 
-    @DeleteMapping("/{city}")
-    public Mono<ApiResponse<String>> deleteCity(@PathVariable String city) {
+    @DeleteMapping
+    public Mono<ApiResponse<String>> delete(
+            @RequestParam(required = false) String city,
+            @RequestParam(required = false) String country) {
 
-        return service.deleteCity(city)
-                .thenReturn(ApiResponse.success("Deleted city: " + city));
+        return service.delete(city, country)
+                .map(deletedCities -> {
+                    if (city != null) {
+                        return ApiResponse.success("Deleted city: " + city);
+                    }
+                    return ApiResponse.success("Deleted advisories for country: " + country + ", cities: " + deletedCities);
+                })
+                .onErrorResume(err -> Mono.error(new RuntimeException(err.getMessage())));
     }
 
     // ---------------- SEARCH ----------------

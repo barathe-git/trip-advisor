@@ -158,12 +158,34 @@ public class AdvisoryService {
 
     // ---------------- DELETE ----------------
 
-    public Mono<Void> deleteCity(String city) {
+    public Mono<List<String>> delete(String city, String country) {
 
-        String key = normalize(city);
-        log.warn("Deleting advisory for city={}", city);
+        if (city != null) {
+            log.warn("Deleting advisory for city={}", city);
+            String key = normalize(city);
+            return repo.findById(key)
+                    .switchIfEmpty(Mono.error(new IllegalArgumentException("No data found for city: " + city)))
+                    .flatMap(advisory -> repo.deleteById(key)
+                            .then(Mono.just(List.of(city))));
+        }
 
-        return repo.deleteById(key);
+        if (country != null) {
+            log.warn("Deleting advisories for country={}", country);
+            return fetch(null, country)
+                    .map(TravelAdvisory::getCity)
+                    .collectList()
+                    .flatMap(cities -> {
+                        if (cities.isEmpty()) {
+                            return Mono.error(new IllegalArgumentException("No data found for country: " + country));
+                        }
+                        return fetch(null, country)
+                                .map(TravelAdvisory::getCityKey)
+                                .flatMap(repo::deleteById)
+                                .then(Mono.just(cities));
+                    });
+        }
+
+        return Mono.error(new IllegalArgumentException("Either city or country must be specified"));
     }
 
     // ---------------- SYNC SINGLE CITY ----------------
