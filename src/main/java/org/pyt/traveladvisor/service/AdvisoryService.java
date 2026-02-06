@@ -2,8 +2,10 @@ package org.pyt.traveladvisor.service;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.pyt.traveladvisor.client.CityClient;
 import org.pyt.traveladvisor.client.CountryClient;
 import org.pyt.traveladvisor.client.OpenWeatherClient;
+import org.pyt.traveladvisor.config.ExternalApiProperties;
 import org.pyt.traveladvisor.dto.AuditType;
 import org.pyt.traveladvisor.dto.CountryApiResponseDto;
 import org.pyt.traveladvisor.dto.WeatherApiResponseDto;
@@ -20,6 +22,11 @@ import reactor.util.function.Tuple2;
 import reactor.util.function.Tuples;
 
 import java.time.Instant;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Service
@@ -29,7 +36,9 @@ public class AdvisoryService {
     private final TravelAdvisoryRepository repo;
     private final OpenWeatherClient weatherClient;
     private final CountryClient countryClient;
+    private final CityClient cityClient;
     private final CityValidator validator;
+    private final ExternalApiProperties props;
 
     // ---------------- FETCH ----------------
 
@@ -54,22 +63,97 @@ public class AdvisoryService {
 
     // ---------------- REFRESH ----------------
 
-    public Flux<TravelAdvisory> refresh(String city, String country) {
+    // Updated: returns tuples with audit info for multi-city flows
+    public Flux<Tuple2<TravelAdvisory, AuditType>> refresh(String city, String country) {
+
+        int concurrency = props.getCities().getConcurrency();
 
         if (city != null) {
-            log.info("Refreshing advisory for city={}", city);
-            return syncCity(city).flux();
+            return refreshSingleCity(city);
         }
 
         if (country != null) {
-            log.info("Refreshing advisories for country={}", country);
-            return fetch(null, country)
-                    .flatMap(a -> syncCity(a.getCity()));
+            return refreshCountry(country, concurrency);
         }
 
+        return refreshAllCities(concurrency);
+    }
+
+    private Flux<Tuple2<TravelAdvisory, AuditType>> refreshSingleCity(String city) {
+        String key = normalize(city);
+        log.info("Refreshing advisory for city={}", key);
+
+        return syncCityWithAudit(key)
+                .flux()
+                .onErrorResume(err -> {
+                    log.error("Failed syncing city {}: {}", key, err.getMessage());
+                    return Flux.empty();
+                });
+    }
+
+    private Flux<Tuple2<TravelAdvisory, AuditType>> refreshCountry(String country, int concurrency) {
+        String normalizedCountry = country.trim();
+        log.info("Refreshing advisories for country={}", normalizedCountry);
+
+        int topN = props.getCities().getTopN();
+
+        Mono<Set<String>> storedCitiesMono = fetch(null, normalizedCountry)
+                .map(TravelAdvisory::getCity)
+                .map(this::normalize)
+                .collect(Collectors.toSet());
+
+        Mono<List<String>> topCitiesMono = getTopCitiesForCountry(normalizedCountry, topN);
+
+        return Mono.zip(storedCitiesMono, topCitiesMono)
+                .flatMapMany(tuple -> buildUnionAndSync(tuple, concurrency))
+                .onErrorResume(err -> {
+                    log.error("Country refresh failed for {}: {}", normalizedCountry, err.getMessage());
+                    return Flux.empty();
+                });
+    }
+
+    private Flux<Tuple2<TravelAdvisory, AuditType>> refreshAllCities(int concurrency) {
         log.info("Refreshing all advisories");
+
         return repo.findAll()
-                .flatMap(a -> syncCity(a.getCity()));
+                .map(TravelAdvisory::getCity)
+                .map(this::normalize)
+                .distinct()
+                .flatMap(this::syncCityWithAudit, concurrency)
+                .onErrorContinue((err, obj) ->
+                        log.warn("Failed syncing city {}: {}", obj, err.getMessage()));
+    }
+
+    private Mono<List<String>> getTopCitiesForCountry(String countryName, int topN) {
+        return countryClient.getCountryByName(countryName)
+                .flatMap(dto -> fetchTopCitiesWithFallback(dto, topN))
+                .onErrorResume(err -> {
+                    log.warn("Failed to fetch top cities for {}: {}", countryName, err.getMessage());
+                    return Mono.just(Collections.emptyList());
+                });
+    }
+
+    private Mono<List<String>> fetchTopCitiesWithFallback(CountryApiResponseDto dto, int topN) {
+        String code = dto.getCca2();
+        List<String> fallback = safeCapitals(dto.getCapital());
+
+        log.info("Country: {}, ISO Code: {}, Capitals: {}", dto.getName().getCommon(), code, fallback);
+
+        if (code == null || code.isBlank()) {
+            log.warn("No country code found for {}, using capitals only", dto.getName().getCommon());
+            return Mono.just(fallback);
+        }
+
+        return cityClient.getTopCitiesByCountryCode(code, topN)
+                .map(list -> list.isEmpty() ? fallback : list);
+    }
+
+    private Mono<Tuple2<TravelAdvisory, AuditType>> syncCityWithAuditSafely(String city) {
+        return syncCityWithAudit(city)
+                .onErrorResume(err -> {
+                    log.warn("Failed syncing city {}: {}", city, err.getMessage());
+                    return Mono.empty();
+                });
     }
 
     // ---------------- DELETE ----------------
@@ -180,11 +264,33 @@ public class AdvisoryService {
                                 a.getWeather().getTemperature() <= max);
     }
 
-    // ---------------- NORMALIZATION ----------------
+    // ---------------- HELPER ----------------
 
     private String normalize(String city) {
 
         validator.validate(city);
         return city.trim().toLowerCase();
+    }
+
+    private List<String> safeCapitals(List<String> capitals) {
+        return capitals == null ? Collections.emptyList() : capitals;
+    }
+
+    private Flux<Tuple2<TravelAdvisory, AuditType>> buildUnionAndSync(
+            Tuple2<Set<String>, List<String>> tuple,
+            int concurrency) {
+
+        Set<String> union = new HashSet<>(tuple.getT1());
+
+        tuple.getT2().stream()
+                .filter(s -> s != null && !s.isBlank())
+                .map(String::trim)
+                .map(String::toLowerCase)
+                .forEach(union::add);
+
+        log.info("Syncing {} cities for country", union.size());
+
+        return Flux.fromIterable(union)
+                .flatMap(city -> syncCityWithAuditSafely(city), concurrency);
     }
 }

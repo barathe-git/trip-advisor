@@ -22,4 +22,14 @@ public class CountryClient {
                 .bodyToMono(CountryApiResponseDto[].class)
                 .map(arr -> arr[0]);
     }
+
+    public Mono<CountryApiResponseDto> getCountryByName(String name) {
+        return countryWebClient.get()
+                .uri(uriBuilder -> uriBuilder.path("/v3.1/name/{name}")
+                        .queryParam("fullText", "true")
+                        .build(name))
+                .retrieve()
+                .bodyToMono(CountryApiResponseDto[].class)
+                .map(arr -> arr[0]);
+    }
 }

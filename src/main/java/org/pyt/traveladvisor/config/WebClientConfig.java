@@ -24,4 +24,11 @@ public class WebClientConfig {
                 .baseUrl(props.getCountry().getBaseUrl())
                 .build();
     }
+
+    @Bean
+    public WebClient citiesWebClient() {
+        return WebClient.builder()
+                .baseUrl(props.getCities().getBaseUrl())
+                .build();
+    }
 }
