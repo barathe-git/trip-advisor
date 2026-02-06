@@ -9,6 +9,7 @@ import java.util.Map;
 public class CountryApiResponseDto {
 
     private NameDto name;
+    private String cca2; // ISO2 country code
     private List<String> capital;
     private List<String> timezones;
     private Map<String, String> languages;
