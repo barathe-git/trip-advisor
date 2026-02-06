@@ -136,6 +136,37 @@ public class AdvisoryService {
                         log.warn("[SERVICE] Failed syncing city: {}, error: {}", obj, err.getMessage()));
     }
 
+    /**
+     * Refreshes all cities in batches to handle large datasets efficiently.
+     * Prevents memory overflow when dealing with millions of records.
+     *
+     * @param batchSize number of cities to process per batch
+     * @param concurrency concurrent requests per batch
+     * @return Flux of Tuple2 containing TravelAdvisory and AuditType
+     */
+    public Flux<Tuple2<TravelAdvisory, AuditType>> refreshAllCitiesInBatches(int batchSize, int concurrency) {
+        log.info("[SERVICE] Starting batch refresh - batch size: {}, concurrency: {}", batchSize, concurrency);
+
+        return repo.findAll()
+                .map(TravelAdvisory::getCity)
+                .map(this::normalize)
+                .distinct()
+                .buffer(batchSize)
+                .doOnNext(batch -> log.info("[SERVICE] Processing batch of {} cities", batch.size()))
+                .flatMap(batch ->
+                        Flux.fromIterable(batch)
+                                .doOnNext(city -> log.debug("[SERVICE] Syncing city in batch: {}", city))
+                                .flatMap(this::syncCityWithAudit, concurrency)
+                                .doOnComplete(() -> log.info("[SERVICE] Batch of {} cities completed", batch.size()))
+                                .onErrorContinue((err, obj) ->
+                                        log.warn("[SERVICE] Failed syncing city in batch: {}, error: {}", obj, err.getMessage())),
+                        1  // Process batches sequentially to control memory usage
+                )
+                .doOnComplete(() -> log.info("[SERVICE] Completed batch refresh of all advisories"))
+                .onErrorContinue((err, obj) ->
+                        log.warn("[SERVICE] Batch processing error: {}", err.getMessage()));
+    }
+
     private Mono<List<String>> getTopCitiesForCountry(String countryName, int topN) {
         return countryClient.getCountryByName(countryName)
                 .flatMap(dto -> fetchTopCitiesWithFallback(dto, topN))

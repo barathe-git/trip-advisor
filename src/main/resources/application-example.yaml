@@ -7,12 +7,19 @@ spring:
   data:
     mongodb:
       uri: mongodb://localhost:27017/travel
+      auto-index-creation: true
 
 app:
   security:
     bearer-token: my-secret-token
   sync:
     multi-city-audit: true
+  scheduler:
+    enabled: true
+    sync-all-interval-ms: 300000  # 5 minutes in milliseconds (5 * 60 * 1000)
+    initial-delay-ms: 30000       # Start after 30 seconds
+    timezone: UTC
+    batch-size: 5                 # Batch size for processing large datasets (testing: 5, production: 100-1000)
 
 external:
   weather:
