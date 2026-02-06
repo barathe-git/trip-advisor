@@ -45,19 +45,25 @@ public class AdvisoryService {
     public Flux<TravelAdvisory> fetch(String city, String country) {
 
         if (city != null) {
-            log.info("Fetching advisory for city={}", city);
+            log.info("[SERVICE] Fetching advisory from database for city: {}", city);
             String key = normalize(city);
-            return repo.findById(key).flux();
+            return repo.findById(key)
+                    .flux()
+                    .doOnNext(advisory -> log.debug("[SERVICE] Found advisory for city: {}", city))
+                    .doOnComplete(() -> log.debug("[SERVICE] Completed fetching for city: {}", city));
         }
 
         if (country != null) {
-            log.info("Fetching advisories for country={}", country);
+            log.info("[SERVICE] Fetching advisories from database for country: {}", country);
             return repo.findAll()
                     .filter(a ->
                             a.getCountry().getName()
-                                    .equalsIgnoreCase(country));
+                                    .equalsIgnoreCase(country))
+                    .doOnNext(advisory -> log.debug("[SERVICE] Found advisory for city: {} in country: {}", advisory.getCity(), country))
+                    .doOnComplete(() -> log.info("[SERVICE] Completed fetching advisories for country: {}", country));
         }
 
+        log.info("[SERVICE] Fetching all advisories from database");
         return repo.findAll();
     }
 
@@ -81,47 +87,53 @@ public class AdvisoryService {
 
     private Flux<Tuple2<TravelAdvisory, AuditType>> refreshSingleCity(String city) {
         String key = normalize(city);
-        log.info("Refreshing advisory for city={}", key);
+        log.info("[SERVICE] Refreshing advisory for city: {}", key);
 
         return syncCityWithAudit(key)
                 .flux()
+                .doOnNext(tuple -> log.info("[SERVICE] Successfully refreshed city: {} with audit type: {}", city, tuple.getT2()))
                 .onErrorResume(err -> {
-                    log.error("Failed syncing city {}: {}", key, err.getMessage());
+                    log.error("[SERVICE] Failed syncing city: {}, error: {}", key, err.getMessage());
                     return Flux.empty();
                 });
     }
 
     private Flux<Tuple2<TravelAdvisory, AuditType>> refreshCountry(String country, int concurrency) {
         String normalizedCountry = country.trim();
-        log.info("Refreshing advisories for country={}", normalizedCountry);
+        log.info("[SERVICE] Refreshing advisories for country: {}", normalizedCountry);
 
         int topN = props.getCities().getTopN();
 
         Mono<Set<String>> storedCitiesMono = fetch(null, normalizedCountry)
                 .map(TravelAdvisory::getCity)
                 .map(this::normalize)
-                .collect(Collectors.toSet());
+                .collect(Collectors.toSet())
+                .doOnNext(cities -> log.info("[SERVICE] Found {} stored cities in database for country: {}", cities.size(), normalizedCountry));
 
-        Mono<List<String>> topCitiesMono = getTopCitiesForCountry(normalizedCountry, topN);
+        Mono<List<String>> topCitiesMono = getTopCitiesForCountry(normalizedCountry, topN)
+                .doOnNext(cities -> log.info("[SERVICE] Fetched top {} cities for country: {}, cities: {}", cities.size(), normalizedCountry, cities));
 
         return Mono.zip(storedCitiesMono, topCitiesMono)
                 .flatMapMany(tuple -> buildUnionAndSync(tuple, concurrency))
+                .doOnComplete(() -> log.info("[SERVICE] Completed refreshing advisories for country: {}", normalizedCountry))
                 .onErrorResume(err -> {
-                    log.error("Country refresh failed for {}: {}", normalizedCountry, err.getMessage());
+                    log.error("[SERVICE] Country refresh failed for: {}, error: {}", normalizedCountry, err.getMessage());
                     return Flux.empty();
                 });
     }
 
     private Flux<Tuple2<TravelAdvisory, AuditType>> refreshAllCities(int concurrency) {
-        log.info("Refreshing all advisories");
+        log.info("[SERVICE] Refreshing all advisories from database");
 
         return repo.findAll()
                 .map(TravelAdvisory::getCity)
                 .map(this::normalize)
                 .distinct()
+                .doOnNext(city -> log.debug("[SERVICE] Syncing city: {}", city))
                 .flatMap(this::syncCityWithAudit, concurrency)
+                .doOnComplete(() -> log.info("[SERVICE] Completed refreshing all advisories"))
                 .onErrorContinue((err, obj) ->
-                        log.warn("Failed syncing city {}: {}", obj, err.getMessage()));
+                        log.warn("[SERVICE] Failed syncing city: {}, error: {}", obj, err.getMessage()));
     }
 
     private Mono<List<String>> getTopCitiesForCountry(String countryName, int topN) {
@@ -161,27 +173,33 @@ public class AdvisoryService {
     public Mono<List<String>> delete(String city, String country) {
 
         if (city != null) {
-            log.warn("Deleting advisory for city={}", city);
+            log.info("[SERVICE] Deleting advisory for city: {}", city);
             String key = normalize(city);
             return repo.findById(key)
+                    .doOnNext(advisory -> log.info("[SERVICE] Found advisory for city: {} in country: {}", city, advisory.getCountry().getName()))
                     .switchIfEmpty(Mono.error(new IllegalArgumentException("No data found for city: " + city)))
                     .flatMap(advisory -> repo.deleteById(key)
+                            .doOnSuccess(v -> log.info("[SERVICE] Successfully deleted advisory for city: {}", city))
                             .then(Mono.just(List.of(city))));
         }
 
         if (country != null) {
-            log.warn("Deleting advisories for country={}", country);
+            log.info("[SERVICE] Deleting advisories for country: {}", country);
             return fetch(null, country)
                     .map(TravelAdvisory::getCity)
                     .collectList()
                     .flatMap(cities -> {
                         if (cities.isEmpty()) {
+                            log.warn("[SERVICE] No advisories found for country: {}", country);
                             return Mono.error(new IllegalArgumentException("No data found for country: " + country));
                         }
+                        log.info("[SERVICE] Found {} advisories for country: {}, cities: {}", cities.size(), country, cities);
                         return fetch(null, country)
                                 .map(TravelAdvisory::getCityKey)
+                                .doOnNext(cityKey -> log.debug("[SERVICE] Deleting city key: {}", cityKey))
                                 .flatMap(repo::deleteById)
-                                .then(Mono.just(cities));
+                                .then(Mono.just(cities))
+                                .doOnSuccess(deletedCities -> log.info("[SERVICE] Successfully deleted {} advisories for country: {}", deletedCities.size(), country));
                     });
         }
 
@@ -193,22 +211,31 @@ public class AdvisoryService {
     public Mono<TravelAdvisory> syncCity(String city) {
 
         String key = city.trim().toLowerCase();
-        log.info("Syncing city={}", city);
+        log.info("[SERVICE] Syncing city: {}", city);
 
         return weatherClient.fetchWeather(city)
                 .doOnNext(w ->
-                        log.debug("Weather fetched for city={}", city))
+                        log.info("[SERVICE] Weather data received for city: {}, temp: {}°C", city, w.getMain().getTemp()))
                 .flatMap(weather -> {
 
                     String code = weather.getSys().getCountry();
+                    log.info("[SERVICE] Country code extracted for city: {}, code: {}", city, code);
 
                     return countryClient.getCountryByCode(code)
-                            .map(country ->
-                                    buildAdvisory(city, key, weather, country));
+                            .map(country -> {
+                                log.info("[SERVICE] Country data received for code: {}, country: {}", code, country.getName().getCommon());
+                                return buildAdvisory(city, key, weather, country);
+                            });
                 })
-                .doOnNext(a ->
-                        log.info("Saved advisory city={}", city))
-                .flatMap(repo::save);
+                .doOnNext(a -> {
+                    log.info("[SERVICE] Built advisory entity for city: {}", city);
+                    log.debug("[SERVICE] Advisory details - city: {}, temp: {}°C, country: {}", a.getCity(), a.getWeather().getTemperature(), a.getCountry().getName());
+                })
+                .flatMap(advisory -> {
+                    log.info("[SERVICE] Saving advisory to database for city: {}", city);
+                    return repo.save(advisory)
+                            .doOnNext(saved -> log.info("[SERVICE] Successfully saved advisory for city: {}", city));
+                });
     }
 
     // ---------------- SYNC WITH AUDIT ----------------
@@ -216,8 +243,10 @@ public class AdvisoryService {
     public Mono<Tuple2<TravelAdvisory, AuditType>> syncCityWithAudit(String city) {
 
         String key = city.trim().toLowerCase();
+        log.info("[SERVICE] Syncing city with audit: {}", city);
 
         return repo.existsById(key)
+                .doOnNext(exists -> log.info("[SERVICE] City exists in database: {}, exists: {}", city, exists))
                 .flatMap(exists ->
                         syncCity(city)
                                 .map(saved -> {
@@ -225,8 +254,8 @@ public class AdvisoryService {
                                             exists ? AuditType.UPDATED
                                                     : AuditType.CREATED;
 
-                                    log.info("Audit: city={} type={}",
-                                            city, type);
+                                    log.info("[SERVICE] Audit - city: {}, auditType: {}, isnew: {}",
+                                            city, type, !exists);
 
                                     return Tuples.of(saved, type);
                                 })
